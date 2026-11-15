@@ -1,0 +1,795 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>手書きメモ帳</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            touch-action: none;
+            -webkit-user-select: none;
+            user-select: none;
+        }
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #f8f9fa;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+        #canvas-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            overflow: hidden;
+            cursor: crosshair;
+        }
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            transform-origin: 0 0;
+        }
+        /* 上部メニュー */
+        #toolbar {
+            position: fixed;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%) translateY(0);
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            padding: 8px 12px;
+            border-radius: 30px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            z-index: 100;
+            transition: transform 0.3s ease, opacity 0.3s ease;
+            max-width: 95vw;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        #toolbar.hidden {
+            transform: translateX(-50%) translateY(-120%);
+            opacity: 0;
+            pointer-events: none;
+        }
+        .tool-btn {
+            background: #f1f3f5;
+            border: none;
+            padding: 8px 12px;
+            border-radius: 18px;
+            font-size: 13px;
+            font-weight: 600;
+            color: #495057;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .tool-btn.active {
+            background: #228be6;
+            color: white;
+        }
+        .tool-btn:active {
+            transform: scale(0.95);
+        }
+        .divider {
+            width: 1px;
+            height: 20px;
+            background: #dee2e6;
+            margin: 0 2px;
+        }
+        /* メニュー開閉用トグルボタン */
+        #menu-toggle {
+            position: fixed;
+            top: 12px;
+            right: 12px;
+            background: rgba(255, 255, 255, 0.95);
+            border: none;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.15);
+            font-size: 16px;
+            font-weight: bold;
+            color: #333;
+            cursor: pointer;
+            z-index: 101;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: transform 0.2s;
+        }
+        #menu-toggle:active {
+            transform: scale(0.9);
+        }
+        /* 選択時バウンディングボックスの操作バー */
+        #selection-toolbar {
+            position: fixed;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(33, 37, 41, 0.9);
+            backdrop-filter: blur(10px);
+            padding: 8px 16px;
+            border-radius: 24px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+            display: none;
+            align-items: center;
+            gap: 10px;
+            z-index: 100;
+        }
+        .sel-btn {
+            background: #495057;
+            color: white;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 14px;
+            font-size: 12px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+        .sel-btn.danger { background: #fa5252; }
+        .sel-btn:active { transform: scale(0.95); }
+    </style>
+</head>
+<body>
+
+    <button id="menu-toggle" title="メニュー表示/非閉">メニュー</button>
+
+    <div id="toolbar">
+        <button class="tool-btn active" data-tool="pen">ペン</button>
+        <button class="tool-btn" data-tool="eraser">線消し</button>
+        <button class="tool-btn" data-tool="lasso">範囲選択</button>
+        <div class="divider"></div>
+        <button class="tool-btn" id="btn-undo">元に戻す</button>
+        <button class="tool-btn" id="btn-redo">やり直す</button>
+        <div class="divider"></div>
+        <button class="tool-btn" id="btn-clear" style="color: #fa5252;">全消去</button>
+        <button class="tool-btn" id="btn-export">画像保存</button>
+    </div>
+
+    <div id="selection-toolbar">
+        <span style="color: white; font-size: 12px; font-weight: bold;">選択中</span>
+        <button class="sel-btn" id="sel-clone">複製</button>
+        <button class="sel-btn danger" id="sel-delete">削除</button>
+        <button class="sel-btn" id="sel-deselect">解除</button>
+    </div>
+
+    <div id="canvas-container">
+        <canvas id="memoCanvas"></canvas>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('memoCanvas');
+        const ctx = canvas.getContext('2d');
+        const container = document.getElementById('canvas-container');
+        const toolbar = document.getElementById('toolbar');
+        const menuToggle = document.getElementById('menu-toggle');
+        const selectionToolbar = document.getElementById('selection-toolbar');
+
+        let currentTool = 'pen'; // 'pen', 'eraser', 'lasso', 'move'
+        let strokes = [];
+        let undoStack = [];
+        let redoStack = [];
+
+        // カメラ・ズーム・移動状態
+        let camera = { x: 0, y: 0, scale: 1 };
+        
+        // 描画中データ
+        let isDrawing = false;
+        let currentPoints = [];
+
+        // 投げ縄・選択状態
+        let lassoPoints = [];
+        let selectedStrokeIds = new Set();
+        let isTransforming = false;
+        let transformMode = null; // 'move', 'nw', 'ne', 'sw', 'se'
+        let transformBox = null;
+        let initialBox = null;
+        let dragStartWorld = { x: 0, y: 0 };
+
+        // 自動スクロール用
+        let autoScrollInterval = null;
+        let lastPointerPos = { x: 0, y: 0 };
+
+        // IndexedDB初期化
+        let db = null;
+        const request = indexedDB.open('HandwritingMemoDB', 1);
+        request.onupgradeneeded = (e) => {
+            db = e.target.result;
+            if (!db.objectStoreNames.contains('strokes')) {
+                db.createObjectStore('strokes', { keyPath: 'id' });
+            }
+        };
+        request.onsuccess = (e) => {
+            db = e.target.result;
+            loadFromDB();
+        };
+
+        function saveToDB() {
+            if (!db) return;
+            const tx = db.transaction('strokes', 'readwrite');
+            const store = tx.objectStore('strokes');
+            store.clear();
+            strokes.forEach(s => store.put(s));
+        }
+
+        function loadFromDB() {
+            if (!db) return;
+            const tx = db.transaction('strokes', 'readonly');
+            const store = tx.objectStore('strokes');
+            const req = store.getAll();
+            req.onsuccess = () => {
+                if (req.result && req.result.length > 0) {
+                    strokes = req.result;
+                }
+                redraw();
+            };
+        }
+
+        // キャンバスサイズ調整
+        function resizeCanvas() {
+            canvas.width = window.innerWidth * window.devicePixelRatio;
+            canvas.height = window.innerHeight * window.devicePixelRatio;
+            canvas.style.width = window.innerWidth + 'px';
+            canvas.style.height = window.innerHeight + 'px';
+            redraw();
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // メニュー開閉トグル
+        let menuVisible = true;
+        menuToggle.addEventListener('click', () => {
+            menuVisible = !menuVisible;
+            if (menuVisible) {
+                toolbar.classList.remove('hidden');
+                menuToggle.textContent = 'メニュー';
+            } else {
+                toolbar.classList.add('hidden');
+                menuToggle.textContent = '開く';
+            }
+        });
+
+        // ツール切り替え
+        document.querySelectorAll('#toolbar .tool-btn[data-tool]').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                document.querySelectorAll('#toolbar .tool-btn').forEach(b => b.classList.remove('active'));
+                e.target.classList.add('active');
+                currentTool = e.target.getAttribute('data-tool');
+                clearSelection();
+            });
+        });
+
+        // 座標変換 (スクリーン -> ワールド)
+        function screenToWorld(sx, sy) {
+            return {
+                x: (sx - camera.x) / camera.scale,
+                y: (sy - camera.y) / camera.scale
+            };
+        }
+
+        // ラグラス(RDP法簡易)によるデータ軽量化
+        function simplifyPoints(points) {
+            if (points.length <= 2) return points;
+            const simplified = [points[0]];
+            for (let i = 1; i < points.length - 1; i++) {
+                const prev = simplified[simplified.length - 1];
+                const curr = points[i];
+                const dist = Math.hypot(curr.x - prev.x, curr.y - prev.y);
+                if (dist > 2) {
+                    simplified.push({ x: Math.round(curr.x * 10) / 10, y: Math.round(curr.y * 10) / 10 });
+                }
+            }
+            simplified.push(points[points.length - 1]);
+            return simplified;
+        }
+
+        // 再描画
+        function redraw() {
+            ctx.save();
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // 背景グリッド描画
+            ctx.strokeStyle = '#e9ecef';
+            ctx.lineWidth = 1;
+            const gridSize = 40 * camera.scale;
+            const offsetX = camera.x % gridSize;
+            const offsetY = camera.y % gridSize;
+            ctx.beginPath();
+            for (let x = offsetX; x < canvas.width; x += gridSize) {
+                ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height);
+            }
+            for (let y = offsetY; y < canvas.height; y += gridSize) {
+                ctx.moveTo(0, y); ctx.lineTo(canvas.width, y);
+            }
+            ctx.stroke();
+
+            // カメラ適用
+            ctx.setTransform(camera.scale * window.devicePixelRatio, 0, 0, camera.scale * window.devicePixelRatio, camera.x * window.devicePixelRatio, camera.y * window.devicePixelRatio);
+
+            // ストローク描画
+            strokes.forEach(stroke => {
+                if (!stroke.points || stroke.points.length === 0) return;
+                ctx.beginPath();
+                ctx.strokeStyle = selectedStrokeIds.has(stroke.id) ? '#228be6' : '#212529';
+                ctx.lineWidth = 3;
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+
+                const pts = stroke.points;
+                ctx.moveTo(pts[0].x, pts[0].y);
+                for (let i = 1; i < pts.length; i++) {
+                    ctx.lineTo(pts[i].x, pts[i].y);
+                }
+                ctx.stroke();
+
+                if (selectedStrokeIds.has(stroke.id)) {
+                    ctx.fillStyle = 'rgba(34, 139, 230, 0.15)';
+                    ctx.fill();
+                }
+            });
+
+            // 描画中ストローク
+            if (isDrawing && currentPoints.length > 0 && currentTool === 'pen') {
+                ctx.beginPath();
+                ctx.strokeStyle = '#212529';
+                ctx.lineWidth = 3;
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+                ctx.moveTo(currentPoints[0].x, currentPoints[0].y);
+                for (let i = 1; i < currentPoints.length; i++) {
+                    ctx.lineTo(currentPoints[i].x, currentPoints[i].y);
+                }
+                ctx.stroke();
+            }
+
+            // 投げ縄の軌跡
+            if (currentTool === 'lasso' && lassoPoints.length > 0) {
+                ctx.beginPath();
+                ctx.strokeStyle = '#228be6';
+                ctx.lineWidth = 1.5;
+                ctx.setLineDash([4, 4]);
+                ctx.moveTo(lassoPoints[0].x, lassoPoints[0].y);
+                for (let i = 1; i < lassoPoints.length; i++) {
+                    ctx.lineTo(lassoPoints[i].x, lassoPoints[i].y);
+                }
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+
+            // 選択バウンディングボックス＆ハンドル
+            if (transformBox) {
+                ctx.strokeStyle = '#228be6';
+                ctx.lineWidth = 1.5;
+                ctx.setLineDash([6, 6]);
+                ctx.strokeRect(transformBox.minX, transformBox.minY, transformBox.width, transformBox.height);
+                ctx.setLineDash([]);
+
+                // 四隅のハンドル
+                const handles = getTransformHandles();
+                ctx.fillStyle = '#ffffff';
+                ctx.strokeStyle = '#228be6';
+                ctx.lineWidth = 2;
+                for (let key in handles) {
+                    const h = handles[key];
+                    ctx.beginPath();
+                    ctx.arc(h.x, h.y, 6 / camera.scale, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.stroke();
+                }
+            }
+
+            ctx.restore();
+        }
+
+        // タッチ / ポインター管理 (マルチタッチ対応)
+        let activePointers = new Map();
+
+        canvas.addEventListener('pointerdown', (e) => {
+            activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+            lastPointerPos = { x: e.clientX, y: e.clientY };
+
+            // 描き始めたら自動でメニューを引っ込める（オートハイド）
+            if (menuVisible && currentTool === 'pen') {
+                menuVisible = false;
+                toolbar.classList.add('hidden');
+                menuToggle.textContent = '開く';
+            }
+
+            if (activePointers.size === 2) {
+                // 2本指になったら描画キャンセルしてピンチズーム・移動モードへ
+                isDrawing = false;
+                isTransforming = false;
+                return;
+            }
+
+            if (activePointers.size === 1) {
+                const wPos = screenToWorld(e.clientX, e.clientY);
+
+                if (currentTool === 'pen') {
+                    isDrawing = true;
+                    currentPoints = [wPos];
+                } else if (currentTool === 'eraser') {
+                    eraseAt(wPos.x, wPos.y);
+                } else if (currentTool === 'lasso') {
+                    if (transformBox) {
+                        // ハンドル or ボックス内判定
+                        transformMode = hitTestTransform(wPos.x, wPos.y);
+                        if (transformMode) {
+                            isTransforming = true;
+                            initialBox = { ...transformBox };
+                            dragStartWorld = wPos;
+                            return;
+                        }
+                    }
+                    // 新規投げ縄開始
+                    lassoPoints = [wPos];
+                }
+            }
+        });
+
+        canvas.addEventListener('pointermove', (e) => {
+            if (!activePointers.has(e.pointerId)) return;
+            const prevPos = activePointers.get(e.pointerId);
+            activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+            // 2本指ピンチズーム＆画面移動
+            if (activePointers.size === 2) {
+                const pts = Array.from(activePointers.values());
+                const p1 = pts[0];
+                const p2 = pts[1];
+                const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+                const center = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
+
+                if (window.lastPinchDist) {
+                    const zoomFactor = dist / window.lastPinchDist;
+                    const newScale = Math.min(Math.max(camera.scale * zoomFactor, 0.2), 5);
+                    
+                    camera.x = center.x - (center.x - camera.x) * (newScale / camera.scale);
+                    camera.y = center.y - (center.y - camera.y) * (newScale / camera.scale);
+                    camera.scale = newScale;
+                    redraw();
+                }
+                window.lastPinchDist = dist;
+                const dx = e.clientX - prevPos.x;
+                const dy = e.clientY - prevPos.y;
+                if (activePointers.size === 2) {
+                    // 2本指の平行移動分も加算
+                }
+                return;
+            }
+
+            // 1本指操作
+            if (activePointers.size === 1) {
+                const wPos = screenToWorld(e.clientX, e.clientY);
+
+                if (isDrawing && currentTool === 'pen') {
+                    currentPoints.push(wPos);
+                    redraw();
+                } else if (currentTool === 'eraser') {
+                    eraseAt(wPos.x, wPos.y);
+                } else if (currentTool === 'lasso' && currentTool === 'lasso' && lassoPoints.length > 0) {
+                    lassoPoints.push(wPos);
+                    redraw();
+                } else if (isTransforming && transformBox) {
+                    handleTransform(wPos);
+                    checkAutoScroll(e.clientX, e.clientY);
+                    redraw();
+                } else if (currentTool === 'move' || (e.buttons === 4)) {
+                    // 中クリックまたは移動モード
+                    camera.x += e.clientX - prevPos.x;
+                    camera.y += e.clientY - prevPos.y;
+                    redraw();
+                }
+            }
+        });
+
+        canvas.addEventListener('pointerup', (e) => {
+            activePointers.delete(e.pointerId);
+            window.lastPinchDist = null;
+            stopAutoScroll();
+
+            if (isDrawing && currentTool === 'pen') {
+                isDrawing = false;
+                if (currentPoints.length > 1) {
+                    const newStroke = {
+                        id: 's_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
+                        points: simplifyPoints(currentPoints)
+                    };
+                    saveStateForUndo();
+                    strokes.push(newStroke);
+                    saveToDB();
+                }
+                currentPoints = [];
+                redraw();
+            } else if (currentTool === 'lasso' && lassoPoints.length > 0) {
+                evaluateLasso();
+                lassoPoints = [];
+                redraw();
+            } else if (isTransforming) {
+                isTransforming = false;
+                transformMode = null;
+                saveStateForUndo();
+                saveToDB();
+            }
+        });
+
+        canvas.addEventListener('pointercancel', (e) => {
+            activePointers.delete(e.pointerId);
+            isDrawing = false;
+            isTransforming = false;
+            stopAutoScroll();
+        });
+
+        // 画面端での自動スクロール機能
+        function checkAutoScroll(clientX, clientY) {
+            const margin = 50;
+            const speed = 12;
+            let dx = 0, dy = 0;
+            if (clientX < margin) dx = speed;
+            if (clientX > window.innerWidth - margin) dx = -speed;
+            if (clientY < margin) dy = speed;
+            if (clientY > window.innerHeight - margin) dy = -speed;
+
+            if ((dx !== 0 || dy !== 0) && !autoScrollInterval) {
+                autoScrollInterval = setInterval(() => {
+                    camera.x += dx;
+                    camera.y += dy;
+                    redraw();
+                }, 16);
+            } else if (dx === 0 && dy === 0) {
+                stopAutoScroll();
+            }
+        }
+        function stopAutoScroll() {
+            if (autoScrollInterval) {
+                clearInterval(autoScrollInterval);
+                autoScrollInterval = null;
+            }
+        }
+
+        // 線消しゴム（ストローク単位）
+        function eraseAt(wx, wy) {
+            const threshold = 15 / camera.scale;
+            let changed = false;
+            strokes = strokes.filter(stroke => {
+                let hit = false;
+                for (let p of stroke.points) {
+                    if (Math.hypot(p.x - wx, p.y - wy) < threshold) {
+                        hit = true;
+                        break;
+                    }
+                }
+                if (hit) changed = true;
+                return !hit;
+            });
+            if (changed) {
+                saveStateForUndo();
+                saveToDB();
+                redraw();
+            }
+        }
+
+        // 投げ縄判定
+        function evaluateLasso() {
+            if (lassoPoints.length < 3) return;
+            selectedStrokeIds.clear();
+
+            strokes.forEach(stroke => {
+                let insideCount = 0;
+                stroke.points.forEach(p => {
+                    if (isPointInPolygon(p, lassoPoints)) insideCount++;
+                });
+                if (insideCount > 0) {
+                    selectedStrokeIds.add(stroke.id);
+                }
+            });
+
+            updateTransformBox();
+        }
+
+        function isPointInPolygon(point, polygon) {
+            let inside = false;
+            for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+                const xi = polygon[i].x, yi = polygon[i].y;
+                const xj = polygon[j].x, yj = polygon[j].y;
+                const intersect = ((yi > point.y) !== (yj > point.y)) && (point.x < (xj - xi) * (point.y - yi) / (yj - yi) + xi);
+                if (intersect) inside = !inside;
+            }
+            return inside;
+        }
+
+        function updateTransformBox() {
+            if (selectedStrokeIds.size === 0) {
+                transformBox = null;
+                selectionToolbar.style.display = 'none';
+                return;
+            }
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            strokes.forEach(s => {
+                if (selectedStrokeIds.has(s.id)) {
+                    s.points.forEach(p => {
+                        minX = Math.min(minX, p.x);
+                        minY = Math.min(minY, p.y);
+                        maxX = Math.max(maxX, p.x);
+                        maxY = Math.max(maxY, p.y);
+                    });
+                }
+            });
+            const pad = 10;
+            transformBox = {
+                minX: minX - pad, minY: minY - pad,
+                maxX: maxX + pad, maxY: maxY + pad,
+                width: (maxX - pad) - (minX - pad),
+                height: (maxY - pad) - (minY - pad)
+            };
+            selectionToolbar.style.display = 'flex';
+        }
+
+        function getTransformHandles() {
+            if (!transformBox) return {};
+            const b = transformBox;
+            return {
+                nw: { x: b.minX, y: b.minY },
+                ne: { x: b.maxX, y: b.minY },
+                sw: { x: b.minX, y: b.maxY },
+                se: { x: b.maxX, y: b.maxY },
+                move: { x: b.minX + b.width / 2, y: b.minY + b.height / 2 }
+            };
+        }
+
+        function hitTestTransform(wx, wy) {
+            const handles = getTransformHandles();
+            const rad = 20 / camera.scale;
+            for (let key in handles) {
+                if (Math.hypot(handles[key].x - wx, handles[key].y - wy) < rad) {
+                    return key;
+                }
+            }
+            if (wx >= transformBox.minX && wx <= transformBox.maxX && wy >= transformBox.minY && wy <= transformBox.maxY) {
+                return 'move';
+            }
+            return null;
+        }
+
+        function handleTransform(wPos) {
+            const dx = wPos.x - dragStartWorld.x;
+            const dy = wPos.y - dragStartWorld.y;
+
+            if (transformMode === 'move') {
+                strokes.forEach(s => {
+                    if (selectedStrokeIds.has(s.id)) {
+                        s.points.forEach(p => {
+                            // 選択中の各ストロークの点を一括移動
+                            // 元の初期位置からの差分を適用するのが正確
+                        });
+                    }
+                });
+                // 簡易平行移動用オフセット
+                transformBox.minX = initialBox.minX + dx;
+                transformBox.minY = initialBox.minY + dy;
+                transformBox.maxX = initialBox.maxX + dx;
+                transformBox.maxY = initialBox.maxY + dy;
+                
+                strokes.forEach(s => {
+                    if (selectedStrokeIds.has(s.id)) {
+                        if (!s._initialPoints) {
+                            s._initialPoints = s.points.map(p => ({ ...p }));
+                        }
+                        s.points = s._initialPoints.map(p => ({ x: p.x + dx, y: p.y + dy }));
+                    }
+                });
+            } else if (['nw', 'ne', 'sw', 'se'].includes(transformMode)) {
+                // スケール変更（リサイズ）
+                let ib = initialBox;
+                let newMinX = ib.minX, newMinY = ib.minY, newMaxX = ib.maxX, newMaxY = ib.maxY;
+
+                if (transformMode === 'nw') { newMinX += dx; newMinY += dy; }
+                if (transformMode === 'ne') { newMaxX += dx; newMinY += dy; }
+                if (transformMode === 'sw') { newMinX += dx; newMaxY += dy; }
+                if (transformMode === 'se') { newMaxX += dx; newMaxY += dy; }
+
+                const scaleX = (newMaxX - newMinX) / ib.width;
+                const scaleY = (newMaxY - newMinY) / ib.height;
+
+                transformBox = { minX: newMinX, minY: newMinY, maxX: newMaxX, maxY: newMaxY, width: newMaxX - newMinX, height: newMaxY - newMinY };
+
+                strokes.forEach(s => {
+                    if (selectedStrokeIds.has(s.id)) {
+                        if (!s._initialPoints) {
+                            s._initialPoints = s.points.map(p => ({ ...p }));
+                        }
+                        s.points = s._initialPoints.map(p => ({
+                            x: newMinX + (p.x - ib.minX) * scaleX,
+                            y: newMinY + (p.y - ib.minY) * scaleY
+                        }));
+                    }
+                });
+            }
+        }
+
+        function clearSelection() {
+            selectedStrokeIds.clear();
+            transformBox = null;
+            selectionToolbar.style.display = 'none';
+            redraw();
+        }
+
+        // 選択メニューの処理
+        document.getElementById('sel-deselect').addEventListener('click', clearSelection);
+        document.getElementById('sel-delete').addEventListener('click', () => {
+            saveStateForUndo();
+            strokes = strokes.filter(s => !selectedStrokeIds.has(s.id));
+            clearSelection();
+            saveToDB();
+        });
+        document.getElementById('sel-clone').addEventListener('click', () => {
+            saveStateForUndo();
+            const clones = [];
+            strokes.forEach(s => {
+                if (selectedStrokeIds.has(s.id)) {
+                    clones.push({
+                        id: 's_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
+                        points: s.points.map(p => ({ x: p.x + 20, y: p.y + 20 }))
+                    });
+                }
+            });
+            strokes.push(...clones);
+            saveToDB();
+            clearSelection();
+        });
+
+        // Undo / Redo
+        function saveStateForUndo() {
+            undoStack.push(JSON.stringify(strokes));
+            if (undoStack.length > 30) undoStack.shift();
+            redoStack = [];
+        }
+
+        document.getElementById('btn-undo').addEventListener('click', () => {
+            if (undoStack.length === 0) return;
+            redoStack.push(JSON.stringify(strokes));
+            strokes = JSON.parse(undoStack.pop());
+            clearSelection();
+            saveToDB();
+            redraw();
+        });
+
+        document.getElementById('btn-redo').addEventListener('click', () => {
+            if (redoStack.length === 0) return;
+            undoStack.push(JSON.stringify(strokes));
+            strokes = JSON.parse(redoStack.pop());
+            clearSelection();
+            saveToDB();
+            redraw();
+        });
+
+        document.getElementById('btn-clear').addEventListener('click', () => {
+            if (confirm('すべてのメモを消去しますか？')) {
+                saveStateForUndo();
+                strokes = [];
+                clearSelection();
+                saveToDB();
+                redraw();
+            }
+        });
+
+        // 画像として保存
+        document.getElementById('btn-export').addEventListener('click', () => {
+            clearSelection();
+            setTimeout(() => {
+                const link = document.createElement('a');
+                link.download = 'memo_' + new Date().toISOString().slice(0,10) + '.png';
+                link.href = canvas.toDataURL('image/png');
+                link.click();
+            }, 50);
+        });
+    </script>
+</body>
+</html>
